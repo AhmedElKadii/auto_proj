@@ -8,6 +8,7 @@ use esp_hal::clock::CpuClock;
 use panic_rtt_target as _;
 use oled_i2c::{Oled, OledConfig, OledKind};
 use esp_hal_servo::{Servo, ServoConfig, async_servo::AsyncServo};
+use embassy_time::{Timer, Duration};
 use esp_hal::{
     i2c::master::{Config, I2c},
     time::Rate,
@@ -82,6 +83,7 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // Servo
     let servo_config = ServoConfig::mg995(Duty::Duty12Bit);
 
     let timer_group0 = TimerGroup::new(peripherals.TIMG0);
@@ -95,7 +97,6 @@ async fn main(spawner: Spawner) -> ! {
         timer::LSClockSource::APBClk,
     ).expect("failed to configure timer");
 
-    // Create servo on GPIO 2
     let servo = Servo::new(
         "async_sweep",
         servo_config.clone(),
@@ -142,10 +143,9 @@ async fn main(spawner: Spawner) -> ! {
 
         async_servo.set_angle(0.0).await;
 
-        // Clear last line
+        // Scrolling name text
         display.fill_solid(&Rectangle::new(Point::new(0, 52), Size::new(128, 16)),BinaryColor::Off).unwrap();
 
-        // Draw updated text
         draw_text(&mut display, offset+300, 60, "Ahmed Salah Anas Mabrouk Yusuf Ghazi Zeyad Tarek").unwrap();
         draw_text(&mut display, offset, 60, "Ahmed Salah Anas Mabrouk Yusuf Ghazi Zeyad Tarek").unwrap();
 
@@ -158,6 +158,6 @@ async fn main(spawner: Spawner) -> ! {
             offset = offset.wrapping_sub(1);
         }
 
-        embassy_time::Timer::after(embassy_time::Duration::from_millis(16)).await;
+        Timer::after(Duration::from_millis(16)).await;
     }
 }
