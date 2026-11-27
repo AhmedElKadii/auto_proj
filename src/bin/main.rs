@@ -7,11 +7,13 @@ use esp_hal::analog::adc::{AdcConfig, Adc, Attenuation};
 use esp_hal::clock::CpuClock;
 use panic_rtt_target as _;
 use oled_i2c::{Oled, OledConfig, OledKind};
-
+use esp_hal_servo::{Servo, ServoConfig, async_servo::AsyncServo};
 use esp_hal::{
-    delay::Delay,
     i2c::master::{Config, I2c},
     time::Rate,
+    ledc::timer::config::Duty,
+    ledc::{Ledc, channel, timer},
+    timer::timg::TimerGroup,
 };
 use embedded_graphics::{
     primitives::*,
@@ -80,6 +82,33 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    let servo_config = ServoConfig::mg995(Duty::Duty12Bit);
+
+    let timer_group0 = TimerGroup::new(peripherals.TIMG0);
+    let timer0 = timer_group0.timer0;
+    esp_rtos::start(timer0, peripherals.FROM_CPU_INTR0);
+    let mut ledc = Ledc::new(peripherals.LEDC);
+
+    let timer = servo_config.configure_timer(
+        &mut ledc,
+        timer::Number::Timer0,
+        timer::LSClockSource::APBClk,
+    ).expect("failed to configure timer");
+
+    // Create servo on GPIO 2
+    let servo = Servo::new(
+        "async_sweep",
+        servo_config.clone(),
+        &mut ledc,
+        &timer,
+        channel::Number::Channel0,
+        peripherals.GPIO2,
+    ).expect("failed to create servo");
+
+    info!("Initial angle: {}°", servo.get_angle());
+
+    let mut async_servo = AsyncServo::new(servo, embassy_time::Delay);
+
     // Potentiometer
     let analog_pin = peripherals.GPIO3;
     let mut adc1_config = AdcConfig::new();
@@ -100,8 +129,6 @@ async fn main(spawner: Spawner) -> ! {
         OledConfig::new(OledKind::Sh1106, 128, 64).with_contrast(0xCF),
     ).expect("OLED init failed");
 
-    let delay = Delay::new();
-
     display.clear().expect("clear failed");
     draw_text(&mut display, 11, 12, "Ackermann Steering").unwrap();
     draw_text(&mut display, 42, 28, "δ_{i} = ∠ 8°").unwrap();
@@ -112,6 +139,8 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         let pin_value: u16 = nb::block!(adc1.read_oneshot(&mut pin)).unwrap();
         info!("{}", pin_value);
+
+        async_servo.set_angle(0.0).await;
 
         // Clear last line
         display.fill_solid(&Rectangle::new(Point::new(0, 52), Size::new(128, 16)),BinaryColor::Off).unwrap();
@@ -129,6 +158,6 @@ async fn main(spawner: Spawner) -> ! {
             offset = offset.wrapping_sub(1);
         }
 
-        delay.delay_millis(16);
+        embassy_time::Timer::after(embassy_time::Duration::from_millis(16)).await;
     }
 }

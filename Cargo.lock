@@ -852,6 +852,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e49ae75051b2fdec8e481599390e093a1bc7c91128709dd05f335fc750a94446"
 dependencies = [
+ "embedded-hal-async",
  "esp-hal",
  "log",
 ]
