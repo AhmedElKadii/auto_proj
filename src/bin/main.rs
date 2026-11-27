@@ -1,63 +1,134 @@
 #![no_std]
 #![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
-)]
-#![deny(clippy::large_stack_frames)]
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use esp_hal::analog::adc::{AdcConfig, Adc, Attenuation};
 use esp_hal::clock::CpuClock;
-use esp_hal::timer::timg::TimerGroup;
+use panic_rtt_target as _;
+use oled_i2c::{Oled, OledConfig, OledKind};
+
+use esp_hal::{
+    delay::Delay,
+    i2c::master::{Config, I2c},
+    time::Rate,
+};
+use embedded_graphics::{
+    primitives::*,
+    draw_target::*,
+    mono_font::MonoTextStyle,
+    pixelcolor::BinaryColor,
+    geometry::{Point, Size},
+    text::Text,
+    Drawable,
+    mono_font::iso_8859_7::{
+        FONT_4X6 as FONT_SUB,
+        FONT_6X10 as FONT_MAIN,
+    }
+};
 use panic_rtt_target as _;
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
+fn draw_text<D>(display: &mut D, x: i32, y: i32, text: &str) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let main = MonoTextStyle::new(&FONT_MAIN, BinaryColor::On);
+    let sub = MonoTextStyle::new(&FONT_SUB, BinaryColor::On);
+
+    let mut cursor = Point::new(x, y);
+    let mut rest = text;
+
+    while let Some(c) = rest.chars().next() {
+        match rest.strip_prefix("_{") {
+            Some(after) if let Some((inside, remaining)) = after.split_once('}') => {
+                let next = Text::new(inside, cursor + Point::new(0, 2), sub)
+                    .draw(display)?;
+                cursor.x = next.x + 1;
+                rest = remaining;
+                continue;
+            }
+            _ => (),
+        }
+
+        let (this, remaining) = rest.split_at(c.len_utf8());
+
+        if c == '∠' {
+            Line::new(cursor, cursor + Point::new(6, 0))
+                .into_styled(stroke)
+                .draw(display)?;
+            Line::new(cursor, cursor + Point::new(5, -6))
+                .into_styled(stroke)
+                .draw(display)?;
+            cursor.x += 8;
+        } else {
+            cursor = Text::new(this, cursor, main).draw(display)?;
+        }
+
+        rest = remaining;
+    }
+
+    Ok(())
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 2.0.0
-    // generator parameters: -o esp32s3 -o esp32s3-wroom-1 -o unstable-hal -o embassy -o stack-smashing-protection -o probe-rs -o defmt -o panic-rtt-target -o embedded-test -o cargo-embed -o neovim-rustaceanvim -o esp
-
     rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // The following pins are used to bootstrap the chip. They are available
-    // for use, but check the datasheet of the module for more information on them.
-    // - GPIO0
-    // - GPIO3
-    // - GPIO45
-    // - GPIO46
-    // These GPIO pins are in use by some feature of the module and should not be used.
-    let _gpio27 = peripherals.GPIO27;
-    let _gpio28 = peripherals.GPIO28;
-    let _gpio29 = peripherals.GPIO29;
-    let _gpio30 = peripherals.GPIO30;
-    let _gpio31 = peripherals.GPIO31;
-    let _gpio32 = peripherals.GPIO32;
+    // Potentiometer
+    let analog_pin = peripherals.GPIO3;
+    let mut adc1_config = AdcConfig::new();
+    let mut pin = adc1_config.enable_pin(analog_pin, Attenuation::_11dB);
+    let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+    // Display
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        Config::default().with_frequency(Rate::from_khz(400)),
+    ).expect("I2C config failed")
+     .with_sda(peripherals.GPIO8)
+     .with_scl(peripherals.GPIO9);
 
-    info!("Embassy initialized!");
+    let mut display = Oled::new(
+        i2c,
+        0x3C,
+        OledConfig::new(OledKind::Sh1106, 128, 64).with_contrast(0xCF),
+    ).expect("OLED init failed");
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
+    let delay = Delay::new();
+
+    display.clear().expect("clear failed");
+    draw_text(&mut display, 11, 12, "Ackermann Steering").unwrap();
+    draw_text(&mut display, 42, 28, "δ_{i} = ∠ 8°").unwrap();
+    draw_text(&mut display, 42, 44, "δ_{o} = ∠12°").unwrap();
+
+    let mut offset = 0;
 
     loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
-    }
+        let pin_value: u16 = nb::block!(adc1.read_oneshot(&mut pin)).unwrap();
+        info!("{}", pin_value);
 
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.2.2/examples
+        // Clear last line
+        display.fill_solid(&Rectangle::new(Point::new(0, 52), Size::new(128, 16)),BinaryColor::Off).unwrap();
+
+        // Draw updated text
+        draw_text(&mut display, offset+300, 60, "Ahmed Salah Anas Mabrouk Yusuf Ghazi Zeyad Tarek").unwrap();
+        draw_text(&mut display, offset, 60, "Ahmed Salah Anas Mabrouk Yusuf Ghazi Zeyad Tarek").unwrap();
+
+        display.flush().expect("flush failed");
+
+        if offset < -298 {
+            offset = 0;
+        }
+        else {
+            offset = offset.wrapping_sub(1);
+        }
+
+        delay.delay_millis(16);
+    }
 }
